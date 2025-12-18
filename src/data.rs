@@ -201,7 +201,7 @@ pub struct OrderArgs {
     pub side: Side,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct OrderBookSummary {
     pub market: String,
     pub asset_id: String,
@@ -402,10 +402,20 @@ pub struct Token {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OrderResponse {
+    /// Polymarket's `/order` endpoint sometimes returns error payloads without a
+    /// `success` field. Defaulting to `false` avoids hard deserialization
+    /// failures that would otherwise hide the real error body.
+    #[serde(default)]
     pub success: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        alias = "error",
+        alias = "message",
+        alias = "detail",
+        alias = "errorMsg"
+    )]
     pub error_msg: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none", alias = "orderID", alias = "orderId")]
     pub order_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub order_hashes: Vec<String>,

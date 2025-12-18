@@ -545,7 +545,30 @@ impl ClobClient {
 
         let req = self.create_request_with_headers(method, endpoint, headers.into_iter());
 
-        Ok(req.json(&body).send().await?.json::<OrderResponse>().await?)
+        // Don't decode JSON directly into `OrderResponse` because Polymarket can return
+        // alternative error payloads (and occasionally non-JSON). Always capture the
+        // raw body so callers get actionable diagnostics.
+        let resp = req.json(&body).send().await?;
+        let status = resp.status();
+        let raw = resp.text().await.unwrap_or_default();
+
+        match serde_json::from_str::<OrderResponse>(&raw) {
+            Ok(parsed) => Ok(parsed),
+            Err(e) => {
+                // Try to see if it's at least JSON; this helps when the API returns a
+                // JSON error payload that doesn't match `OrderResponse` exactly.
+                let json_hint = serde_json::from_str::<Value>(&raw).ok();
+                Err(anyhow!(
+                    "error decoding response body (status={}): {}; body={}",
+                    status,
+                    e,
+                    json_hint
+                        .as_ref()
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| raw)
+                ))
+            }
+        }
     }
 
     pub async fn create_and_post_order(&self, order_args: &OrderArgs) -> ClientResult<OrderResponse> {
