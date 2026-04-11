@@ -18,20 +18,21 @@ sol! {
     }
 }
 
+// CTF Exchange V2: removed taker/expiration/nonce/feeRateBps,
+// added timestamp/metadata/builder. Domain version "2".
 sol! {
     struct Order {
         uint256 salt;
         address maker;
         address signer;
-        address taker;
         uint256 tokenId;
         uint256 makerAmount;
         uint256 takerAmount;
-        uint256 expiration;
-        uint256 nonce;
-        uint256 feeRateBps;
         uint8 side;
         uint8 signatureType;
+        uint256 timestamp;
+        bytes32 metadata;
+        bytes32 builder;
     }
 }
 
@@ -40,7 +41,6 @@ pub fn sign_clob_auth_message(
     timestamp: String,
     nonce: U256,
 ) -> ClientResult<String> {
-    // TODO: move these constants out
     let message = "This message attests that I control the given wallet".to_owned();
     let polygon = 137;
 
@@ -72,10 +72,9 @@ pub fn sign_order_message(
 ) -> ClientResult<String> {
     let domain = eip712_domain!(
         name: "Polymarket CTF Exchange",
-        version: "1",
+        version: "2",
         chain_id: chain_id,
         verifying_contract: verifying_contract,
-
     );
 
     let val = signer

@@ -1,4 +1,5 @@
 use alloy_primitives::Address;
+use alloy_primitives::FixedBytes;
 use alloy_primitives::U256;
 use anyhow::anyhow;
 use anyhow::{Context, Result};
@@ -13,23 +14,19 @@ use crate::config::get_contract_config;
 use crate::eth_utils::sign_order_message;
 use crate::eth_utils::Order;
 use crate::utils::get_current_unix_time_secs;
-use crate::{
-    CreateOrderOptions, EthSigner, ExtraOrderArgs, MarketOrderArgs, OrderArgs, OrderSummary, Side,
-};
+use crate::{CreateOrderOptions, EthSigner, MarketOrderArgs, OrderArgs, OrderSummary, Side};
 
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::LazyLock;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Signature type for different wallet configurations
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum SigType {
-    // ECDSA EIP712 signatures signed by EOAs (Externally Owned Accounts)
     Eoa = 0,
-    // EIP712 signatures signed by EOAs that own Polymarket Proxy wallets
     PolyProxy = 1,
-    // EIP712 signatures signed by EOAs that own Polymarket Gnosis safes
     PolyGnosisSafe = 2,
+    Poly1271 = 3,
 }
 
 pub struct OrderBuilder {
@@ -44,6 +41,8 @@ pub struct RoundConfig {
     amount: u32,
 }
 
+static BYTES32_ZERO: FixedBytes<32> = FixedBytes::ZERO;
+
 fn generate_seed() -> u64 {
     let mut rng = thread_rng();
     let y: f64 = rng.gen();
@@ -51,21 +50,32 @@ fn generate_seed() -> u64 {
     a as u64
 }
 
+fn current_timestamp_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock went backwards")
+        .as_millis() as u64
+}
+
+/// V2 wire format for signed orders posted to `/order`.
+/// Removes taker/nonce/fee_rate_bps and adds timestamp/metadata/builder.
+/// `expiration` stays on the wire (default "0" for GTC) even though it's
+/// no longer part of the EIP-712 struct.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SignedOrderRequest {
     pub salt: u64,
     pub maker: String,
     pub signer: String,
-    pub taker: String,
     pub token_id: String,
     pub maker_amount: String,
     pub taker_amount: String,
-    pub expiration: String,
-    pub nonce: String,
-    pub fee_rate_bps: String,
     pub side: String,
     pub signature_type: u8,
+    pub timestamp: String,
+    pub metadata: String,
+    pub builder: String,
+    pub expiration: String,
     pub signature: String,
 }
 
@@ -218,7 +228,6 @@ impl OrderBuilder {
         chain_id: u64,
         order_args: &MarketOrderArgs,
         price: Decimal,
-        extras: &ExtraOrderArgs,
         options: CreateOrderOptions,
     ) -> Result<SignedOrderRequest> {
         let (maker_amount, taker_amount) = self.get_market_order_amounts(
@@ -229,16 +238,19 @@ impl OrderBuilder {
                 .context("Cannot create order without tick size")?],
         );
 
-        let contract_config = get_contract_config(
-            chain_id,
-            options
-                .neg_risk
-                .context("Cannot create order without neg_risk")?,
-        )
-        .context("No contract found with given chain_id and neg_risk")?;
+        let contract_config =
+            get_contract_config(chain_id).context("No contract config for chain_id")?;
 
-        let exchange_address = Address::from_str(contract_config.exchange.as_ref())
-            .context("Invalid exchange address")?;
+        let neg_risk = options
+            .neg_risk
+            .context("Cannot create order without neg_risk")?;
+        let exchange_addr = if neg_risk {
+            &contract_config.neg_risk_exchange
+        } else {
+            &contract_config.exchange
+        };
+        let exchange_address =
+            Address::from_str(exchange_addr).context("Invalid exchange address")?;
 
         self.build_signed_order(
             order_args.token_id.clone(),
@@ -248,7 +260,8 @@ impl OrderBuilder {
             maker_amount,
             taker_amount,
             0,
-            extras,
+            None,
+            None,
         )
     }
 
@@ -257,7 +270,6 @@ impl OrderBuilder {
         chain_id: u64,
         order_args: &OrderArgs,
         expiration: u64,
-        extras: &ExtraOrderArgs,
         options: CreateOrderOptions,
     ) -> Result<SignedOrderRequest> {
         let (maker_amount, taker_amount) = self.get_order_amounts(
@@ -269,16 +281,19 @@ impl OrderBuilder {
                 .context("Cannot create order without tick size")?],
         );
 
-        let contract_config = get_contract_config(
-            chain_id,
-            options
-                .neg_risk
-                .context("Cannot create order without neg_risk")?,
-        )
-        .context("No contract found with given chain_id and neg_risk")?;
+        let contract_config =
+            get_contract_config(chain_id).context("No contract config for chain_id")?;
 
-        let exchange_address = Address::from_str(contract_config.exchange.as_ref())
-            .context("Invalid exchange address")?;
+        let neg_risk = options
+            .neg_risk
+            .context("Cannot create order without neg_risk")?;
+        let exchange_addr = if neg_risk {
+            &contract_config.neg_risk_exchange
+        } else {
+            &contract_config.exchange
+        };
+        let exchange_address =
+            Address::from_str(exchange_addr).context("Invalid exchange address")?;
 
         self.build_signed_order(
             order_args.token_id.clone(),
@@ -288,7 +303,8 @@ impl OrderBuilder {
             maker_amount,
             taker_amount,
             expiration,
-            extras,
+            None,
+            None,
         )
     }
 
@@ -302,11 +318,13 @@ impl OrderBuilder {
         maker_amount: u32,
         taker_amount: u32,
         expiration: u64,
-        extras: &ExtraOrderArgs,
+        metadata: Option<FixedBytes<32>>,
+        builder: Option<FixedBytes<32>>,
     ) -> Result<SignedOrderRequest> {
         let seed = generate_seed();
-        let taker_address =
-            Address::from_str(extras.taker.as_ref()).context("Invalid taker address")?;
+        let timestamp = current_timestamp_ms();
+        let metadata = metadata.unwrap_or(BYTES32_ZERO);
+        let builder = builder.unwrap_or(BYTES32_ZERO);
 
         let u256_token_id =
             U256::from_str_radix(token_id.as_ref(), 10).context("Incorrect tokenId format")?;
@@ -315,15 +333,14 @@ impl OrderBuilder {
             salt: U256::from(seed),
             maker: self.funder,
             signer: self.signer.address(),
-            taker: taker_address,
             tokenId: u256_token_id,
             makerAmount: U256::from(maker_amount),
             takerAmount: U256::from(taker_amount),
-            expiration: U256::from(expiration),
-            nonce: extras.nonce,
-            feeRateBps: U256::from(extras.fee_rate_bps),
             side: side as u8,
             signatureType: self.sig_type as u8,
+            timestamp: U256::from(timestamp),
+            metadata,
+            builder,
         };
 
         let signature = sign_order_message(&self.signer, order, chain_id, exchange)?;
@@ -332,15 +349,15 @@ impl OrderBuilder {
             salt: seed,
             maker: self.funder.to_checksum(None),
             signer: self.signer.address().to_checksum(None),
-            taker: taker_address.to_checksum(None),
             token_id,
             maker_amount: maker_amount.to_string(),
             taker_amount: taker_amount.to_string(),
-            expiration: expiration.to_string(),
-            nonce: extras.nonce.to_string(),
-            fee_rate_bps: extras.fee_rate_bps.to_string(),
             side: side.as_str().into(),
             signature_type: self.sig_type as u8,
+            timestamp: timestamp.to_string(),
+            metadata: format!("0x{}", alloy_primitives::hex::encode(metadata)),
+            builder: format!("0x{}", alloy_primitives::hex::encode(builder)),
+            expiration: expiration.to_string(),
             signature,
         })
     }
