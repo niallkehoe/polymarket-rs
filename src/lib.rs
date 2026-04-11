@@ -150,15 +150,20 @@ impl ClobClient {
     }
 
     pub fn get_collateral_address(&self) -> Option<String> {
-        Some(get_contract_config(self.chain_id?, false)?.collateral)
+        Some(get_contract_config(self.chain_id?)?.collateral)
     }
 
     pub fn get_conditional_address(&self) -> Option<String> {
-        Some(get_contract_config(self.chain_id?, false)?.conditional_tokens)
+        Some(get_contract_config(self.chain_id?)?.conditional_tokens)
     }
 
-    pub fn get_exchange_address(&self) -> Option<String> {
-        Some(get_contract_config(self.chain_id?, false)?.exchange)
+    pub fn get_exchange_address(&self, neg_risk: bool) -> Option<String> {
+        let cfg = get_contract_config(self.chain_id?)?;
+        if neg_risk {
+            Some(cfg.neg_risk_exchange)
+        } else {
+            Some(cfg.exchange)
+        }
     }
 
     fn create_request_with_headers(
@@ -424,7 +429,6 @@ impl ClobClient {
         &self,
         order_args: &OrderArgs,
         expiration: Option<u64>,
-        extras: Option<ExtraOrderArgs>,
         options: Option<&CreateOrderOptions>,
     ) -> ClientResult<SignedOrderRequest> {
         let (_, chain_id) = self.get_l1_parameters();
@@ -433,7 +437,6 @@ impl ClobClient {
             .get_filled_order_options(order_args.token_id.as_ref(), options)
             .await?;
         let expiration = expiration.unwrap_or(0);
-        let extras = extras.unwrap_or_default();
 
         if !self.is_price_in_range(
             order_args.price,
@@ -445,13 +448,7 @@ impl ClobClient {
         self.order_builder
             .as_ref()
             .expect("OrderBuilder not set")
-            .create_order(
-                chain_id,
-                order_args,
-                expiration,
-                &extras,
-                create_order_options,
-            )
+            .create_order(chain_id, order_args, expiration, create_order_options)
     }
 
     pub async fn get_order_book(&self, token_id: &str) -> ClientResult<OrderBookSummary> {
@@ -504,7 +501,6 @@ impl ClobClient {
     pub async fn create_market_order(
         &self,
         order_args: &MarketOrderArgs,
-        extras: Option<ExtraOrderArgs>,
         options: Option<&CreateOrderOptions>,
     ) -> ClientResult<SignedOrderRequest> {
         let (_, chain_id) = self.get_l1_parameters();
@@ -513,7 +509,6 @@ impl ClobClient {
             .get_filled_order_options(order_args.token_id.as_ref(), options)
             .await?;
 
-        let extras = extras.unwrap_or_default();
         let price = self
             .calculate_market_price(&order_args.token_id, Side::BUY, order_args.amount)
             .await?;
@@ -527,16 +522,17 @@ impl ClobClient {
         self.order_builder
             .as_ref()
             .expect("OrderBuilder not set")
-            .create_market_order(chain_id, order_args, price, &extras, create_order_options)
+            .create_market_order(chain_id, order_args, price, create_order_options)
     }
 
     pub async fn post_order(
         &self,
         order: SignedOrderRequest,
         order_type: OrderType,
+        tick_size: Decimal,
     ) -> ClientResult<OrderResponse> {
         let (signer, creds) = self.get_l2_parameters();
-        let body = PostOrder::new(order, creds.api_key.clone(), order_type);
+        let body = PostOrder::new(order, creds.api_key.clone(), order_type, tick_size);
 
         let method = Method::POST;
         let endpoint = "/order";
@@ -571,14 +567,22 @@ impl ClobClient {
         }
     }
 
-    pub async fn create_and_post_order(&self, order_args: &OrderArgs) -> ClientResult<OrderResponse> {
-        let order = self.create_order(order_args, None, None, None).await?;
-        self.post_order(order, OrderType::GTC).await
+    pub async fn create_and_post_order(
+        &self,
+        order_args: &OrderArgs,
+        options: Option<&CreateOrderOptions>,
+    ) -> ClientResult<OrderResponse> {
+        let filled = self
+            .get_filled_order_options(order_args.token_id.as_ref(), options)
+            .await?;
+        let tick_size = filled.tick_size.expect("Should be filled");
+        let order = self.create_order(order_args, None, Some(&filled)).await?;
+        self.post_order(order, OrderType::GTC, tick_size).await
     }
 
     pub async fn post_order_batch(
         &self,
-        orders: Vec<(SignedOrderRequest, OrderType)>,
+        orders: Vec<(SignedOrderRequest, OrderType, Decimal)>,
     ) -> ClientResult<BatchOrderResponse> {
         if orders.len() > 5 {
             return Err(anyhow!("Maximum of 5 orders allowed per batch"));
@@ -588,7 +592,9 @@ impl ClobClient {
 
         let post_orders: Vec<PostOrder> = orders
             .into_iter()
-            .map(|(order, order_type)| PostOrder::new(order, creds.api_key.clone(), order_type))
+            .map(|(order, order_type, tick_size)| {
+                PostOrder::new(order, creds.api_key.clone(), order_type, tick_size)
+            })
             .collect();
 
         let body = PostOrderBatch::new(post_orders);
@@ -605,7 +611,7 @@ impl ClobClient {
 
     pub async fn create_and_post_order_batch(
         &self,
-        orders_args: &[(OrderArgs, OrderType)],
+        orders_args: &[(OrderArgs, OrderType, Option<CreateOrderOptions>)],
     ) -> ClientResult<BatchOrderResponse> {
         if orders_args.len() > 5 {
             return Err(anyhow!("Maximum of 5 orders allowed per batch"));
@@ -613,9 +619,13 @@ impl ClobClient {
 
         let mut signed_orders = Vec::new();
 
-        for (order_args, order_type) in orders_args {
-            let signed_order = self.create_order(order_args, None, None, None).await?;
-            signed_orders.push((signed_order, *order_type));
+        for (order_args, order_type, opts) in orders_args {
+            let filled = self
+                .get_filled_order_options(order_args.token_id.as_ref(), opts.as_ref())
+                .await?;
+            let tick_size = filled.tick_size.expect("Should be filled");
+            let signed_order = self.create_order(order_args, None, Some(&filled)).await?;
+            signed_orders.push((signed_order, *order_type, tick_size));
         }
 
         self.post_order_batch(signed_orders).await

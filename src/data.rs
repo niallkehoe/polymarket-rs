@@ -1,13 +1,10 @@
 use crate::Decimal;
 
 use crate::SignedOrderRequest;
-use alloy_primitives::U256;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::fmt::Display;
 use std::str::FromStr;
-
-const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 
 pub enum AssetType {
     COLLATERAL,
@@ -170,14 +167,16 @@ pub struct PostOrder {
     order: SignedOrderRequest,
     owner: String,
     order_type: OrderType,
+    tick_size: String,
 }
 
 impl PostOrder {
-    pub fn new(order: SignedOrderRequest, owner: String, order_type: OrderType) -> Self {
+    pub fn new(order: SignedOrderRequest, owner: String, order_type: OrderType, tick_size: Decimal) -> Self {
         PostOrder {
             order,
             owner,
             order_type,
+            tick_size: tick_size.to_string(),
         }
     }
 }
@@ -233,23 +232,6 @@ impl OrderArgs {
             price,
             size,
             side,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct ExtraOrderArgs {
-    pub fee_rate_bps: u32,
-    pub nonce: U256,
-    pub taker: String,
-}
-
-impl Default for ExtraOrderArgs {
-    fn default() -> Self {
-        ExtraOrderArgs {
-            fee_rate_bps: 0,
-            nonce: U256::ZERO,
-            taker: ZERO_ADDRESS.into(),
         }
     }
 }
