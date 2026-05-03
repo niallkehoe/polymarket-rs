@@ -6,6 +6,8 @@ use serde_json::Value;
 use std::fmt::Display;
 use std::str::FromStr;
 
+pub const BYTES32_ZERO: &str =
+    "0x0000000000000000000000000000000000000000000000000000000000000000";
 pub enum AssetType {
     COLLATERAL,
     CONDITIONAL,
@@ -198,6 +200,9 @@ pub struct OrderArgs {
     pub price: Decimal,
     pub size: Decimal,
     pub side: Side,
+    pub expiration: u64,
+    pub builder_code: String,
+    pub metadata: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -215,6 +220,8 @@ pub struct OrderBookSummary {
 pub struct MarketOrderArgs {
     pub token_id: String,
     pub amount: Decimal,
+    pub builder_code: String,
+    pub metadata: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -232,10 +239,27 @@ impl OrderArgs {
             price,
             size,
             side,
+            expiration: 0,
+            builder_code: BYTES32_ZERO.to_owned(),
+            metadata: BYTES32_ZERO.to_owned(),
         }
     }
 }
 
+#[derive(Debug)]
+pub struct ExtraOrderArgs {
+    pub builder_code: String,
+    pub metadata: String,
+}
+
+impl Default for ExtraOrderArgs {
+    fn default() -> Self {
+        ExtraOrderArgs {
+            builder_code: BYTES32_ZERO.to_owned(),
+            metadata: BYTES32_ZERO.to_owned(),
+        }
+    }
+}
 #[derive(Debug, Default)]
 pub struct CreateOrderOptions {
     pub tick_size: Option<Decimal>,
@@ -416,4 +440,18 @@ pub struct Rewards {
     pub event_end_date: Option<String>,
     pub in_game_multiplier: Option<Decimal>,
     pub reward_epoch: Option<Decimal>,
+}
+
+/// A single user position entry from the Polymarket Data API
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Position {
+    pub slug: String,
+    pub event_slug: String,
+    /// Raw share count (always positive; `outcome` / `outcome_index` determines direction).
+    pub size: f64,
+    /// `"Yes"` or `"No"`.
+    pub outcome: String,
+    #[serde(default)]
+    pub outcome_index: u32,
 }

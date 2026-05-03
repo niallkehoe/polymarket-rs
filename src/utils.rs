@@ -16,6 +16,13 @@ pub fn get_current_unix_time_secs() -> u64 {
         .as_secs()
 }
 
+pub fn get_current_unix_time_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("Time went backwards")
+        .as_millis()
+}
+
 pub fn build_hmac_signature<T>(
     secret: &str,
     timestamp: u64,

@@ -36,6 +36,9 @@ pub struct ClobClient {
     chain_id: Option<u64>,
     api_creds: Option<ApiCreds>,
     order_builder: Option<OrderBuilder>,
+    /// Funded proxy wallet address (the `funder` / `PUBLIC_KEY`).
+    /// Set when constructing with a proxy funder; `None` for EOA-only clients.
+    funder_address: Option<String>,
 }
 
 const INITIAL_CURSOR: &str = "MA==";
@@ -62,6 +65,7 @@ impl ClobClient {
             chain_id: Some(chain_id),
             api_creds: None,
             order_builder: Some(OrderBuilder::new(signer, None, None)),
+            funder_address: None,
         }
     }
 
@@ -84,6 +88,7 @@ impl ClobClient {
             chain_id: Some(chain_id),
             api_creds: None,
             order_builder: Some(OrderBuilder::new(signer, signature_type, funder_address)),
+            funder_address: funder.map(str::to_owned),
         }
     }
 
@@ -99,6 +104,7 @@ impl ClobClient {
             chain_id: Some(chain_id),
             api_creds: Some(api_creds),
             order_builder: Some(OrderBuilder::new(signer, None, None)),
+            funder_address: None,
         }
     }
     
@@ -122,6 +128,7 @@ impl ClobClient {
             chain_id: Some(chain_id),
             api_creds: Some(api_creds),
             order_builder: Some(OrderBuilder::new(signer, signature_type, funder_address)),
+            funder_address: funder.map(str::to_owned),
         }
     }
 
@@ -149,6 +156,12 @@ impl ClobClient {
         Some(encode_prefixed(self.signer.as_ref()?.address().as_slice()))
     }
 
+    /// Returns the funded proxy wallet address set at construction time.
+    /// This is the `PUBLIC_KEY` / funder address, not the EOA signer key.
+    pub fn get_funder_address(&self) -> Option<&str> {
+        self.funder_address.as_deref()
+    }
+
     pub fn get_collateral_address(&self) -> Option<String> {
         Some(get_contract_config(self.chain_id?)?.collateral)
     }
@@ -164,6 +177,45 @@ impl ClobClient {
         } else {
             Some(cfg.exchange)
         }
+    }
+
+    /// Fetches all open positions for the funded proxy wallet from the Polymarket Data API.
+    ///
+    /// Pages through `https://data-api.polymarket.com/positions` until exhausted.
+    pub async fn get_user_positions(&self) -> ClientResult<Vec<Position>> {
+        let address = self
+            .funder_address
+            .as_deref()
+            .ok_or_else(|| anyhow!("No funder address set on ClobClient"))?;
+
+        const LIMIT: usize = 500;
+        let mut offset: usize = 0;
+        let mut all: Vec<Position> = Vec::new();
+        let http = Client::new();
+
+        loop {
+            let page: Vec<Position> = http
+                .get("https://data-api.polymarket.com/positions")
+                .query(&[
+                    ("user", address),
+                    ("sizeThreshold", "1"),
+                    ("limit", &LIMIT.to_string()),
+                    ("offset", &offset.to_string()),
+                ])
+                .send()
+                .await?
+                .json()
+                .await?;
+
+            let page_len = page.len();
+            all.extend(page);
+            if page_len < LIMIT {
+                break;
+            }
+            offset += LIMIT;
+        }
+
+        Ok(all)
     }
 
     fn create_request_with_headers(
@@ -436,7 +488,7 @@ impl ClobClient {
         let create_order_options = self
             .get_filled_order_options(order_args.token_id.as_ref(), options)
             .await?;
-        let expiration = expiration.unwrap_or(0);
+        let expiration = expiration.unwrap_or(order_args.expiration);
 
         if !self.is_price_in_range(
             order_args.price,

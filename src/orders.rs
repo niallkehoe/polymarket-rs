@@ -1,6 +1,4 @@
-use alloy_primitives::Address;
-use alloy_primitives::FixedBytes;
-use alloy_primitives::U256;
+use alloy_primitives::{Address, B256, U256};
 use anyhow::anyhow;
 use anyhow::{Context, Result};
 use rand::thread_rng;
@@ -13,13 +11,14 @@ use serde::Serialize;
 use crate::config::get_contract_config;
 use crate::eth_utils::sign_order_message;
 use crate::eth_utils::Order;
-use crate::utils::get_current_unix_time_secs;
-use crate::{CreateOrderOptions, EthSigner, MarketOrderArgs, OrderArgs, OrderSummary, Side};
+use crate::utils::get_current_unix_time_millis;
+use crate::{
+    CreateOrderOptions, EthSigner, MarketOrderArgs, OrderArgs, OrderSummary, Side,
+};
 
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::LazyLock;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum SigType {
@@ -41,26 +40,16 @@ pub struct RoundConfig {
     amount: u32,
 }
 
-static BYTES32_ZERO: FixedBytes<32> = FixedBytes::ZERO;
-
 fn generate_seed() -> u64 {
     let mut rng = thread_rng();
     let y: f64 = rng.gen();
-    let a: f64 = get_current_unix_time_secs() as f64 * y;
+    let a: f64 = get_current_unix_time_millis() as f64 * y;
     a as u64
 }
 
-fn current_timestamp_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock went backwards")
-        .as_millis() as u64
+fn parse_bytes32(value: &str, field: &str) -> Result<B256> {
+    B256::from_str(value).with_context(|| format!("Invalid {field} bytes32"))
 }
-
-/// V2 wire format for signed orders posted to `/order`.
-/// Removes taker/nonce/fee_rate_bps and adds timestamp/metadata/builder.
-/// `expiration` stays on the wire (default "0" for GTC) even though it's
-/// no longer part of the EIP-712 struct.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SignedOrderRequest {
@@ -70,12 +59,12 @@ pub struct SignedOrderRequest {
     pub token_id: String,
     pub maker_amount: String,
     pub taker_amount: String,
+    pub expiration: String,
     pub side: String,
     pub signature_type: u8,
     pub timestamp: String,
     pub metadata: String,
     pub builder: String,
-    pub expiration: String,
     pub signature: String,
 }
 
@@ -260,8 +249,8 @@ impl OrderBuilder {
             maker_amount,
             taker_amount,
             0,
-            None,
-            None,
+            &order_args.builder_code,
+            &order_args.metadata,
         )
     }
 
@@ -303,8 +292,8 @@ impl OrderBuilder {
             maker_amount,
             taker_amount,
             expiration,
-            None,
-            None,
+            &order_args.builder_code,
+            &order_args.metadata,
         )
     }
 
@@ -318,16 +307,16 @@ impl OrderBuilder {
         maker_amount: u32,
         taker_amount: u32,
         expiration: u64,
-        metadata: Option<FixedBytes<32>>,
-        builder: Option<FixedBytes<32>>,
+        builder_code: &str,
+        metadata: &str,
     ) -> Result<SignedOrderRequest> {
         let seed = generate_seed();
-        let timestamp = current_timestamp_ms();
-        let metadata = metadata.unwrap_or(BYTES32_ZERO);
-        let builder = builder.unwrap_or(BYTES32_ZERO);
+        let timestamp = get_current_unix_time_millis();
 
         let u256_token_id =
             U256::from_str_radix(token_id.as_ref(), 10).context("Incorrect tokenId format")?;
+        let metadata_b256 = parse_bytes32(metadata, "metadata")?;
+        let builder_b256 = parse_bytes32(builder_code, "builder")?;
 
         let order = Order {
             salt: U256::from(seed),
@@ -339,8 +328,8 @@ impl OrderBuilder {
             side: side as u8,
             signatureType: self.sig_type as u8,
             timestamp: U256::from(timestamp),
-            metadata,
-            builder,
+            metadata: metadata_b256,
+            builder: builder_b256,
         };
 
         let signature = sign_order_message(&self.signer, order, chain_id, exchange)?;
@@ -352,12 +341,12 @@ impl OrderBuilder {
             token_id,
             maker_amount: maker_amount.to_string(),
             taker_amount: taker_amount.to_string(),
+            expiration: expiration.to_string(),
             side: side.as_str().into(),
             signature_type: self.sig_type as u8,
             timestamp: timestamp.to_string(),
-            metadata: format!("0x{}", alloy_primitives::hex::encode(metadata)),
-            builder: format!("0x{}", alloy_primitives::hex::encode(builder)),
-            expiration: expiration.to_string(),
+            metadata: metadata.to_string(),
+            builder: builder_code.to_string(),
             signature,
         })
     }
